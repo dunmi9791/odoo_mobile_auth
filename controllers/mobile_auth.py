@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 
 from odoo import fields, http
+from odoo.exceptions import AccessDenied
 from odoo.http import request
 from odoo.tools import date_utils
 
@@ -40,6 +41,21 @@ def _rpc_error(message, code=100, status=200):
 
 def _hash_token(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _authenticate_session(db, login, password):
+    credential = {
+        "login": login,
+        "password": password,
+        "type": "password",
+    }
+
+    try:
+        uid = request.session.authenticate(db, credential)
+    except TypeError:
+        uid = request.session.authenticate(db, login, password)
+
+    return uid or request.session.uid
 
 
 def _bearer_token():
@@ -118,7 +134,11 @@ class WorkshopMobileAuthController(http.Controller):
         if not db or not login or not password:
             return _rpc_error("db, login and password are required", code=400, status=400)
 
-        uid = request.session.authenticate(db, login, password)
+        try:
+            uid = _authenticate_session(db, login, password)
+        except AccessDenied:
+            return _rpc_error("Invalid credentials", code=401, status=401)
+
         if not uid:
             return _rpc_error("Invalid credentials", code=401, status=401)
 
