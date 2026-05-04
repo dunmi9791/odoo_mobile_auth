@@ -44,7 +44,10 @@ def _rpc_success(data, payload=None):
     return {
         "jsonrpc": "2.0",
         "id": _rpc_id(payload),
-        "result": data,
+        "result": {
+            "success": True,
+            "data": data,
+        },
     }
 
 
@@ -57,6 +60,33 @@ def _rpc_error(message, code=100, status=200, payload=None):
             "message": message,
         },
     }, status=status)
+
+
+def _normalize_workshop_payload(result, payload=None):
+    if isinstance(result, dict) and "jsonrpc" in result:
+        rpc_result = result.get("result")
+        if isinstance(rpc_result, dict) and "success" in rpc_result:
+            return result
+
+        if "result" in result:
+            return {
+                **result,
+                "result": {
+                    "success": True,
+                    "data": rpc_result,
+                },
+            }
+
+        return result
+
+    if isinstance(result, dict) and "success" in result and "data" in result:
+        return {
+            "jsonrpc": "2.0",
+            "id": _rpc_id(payload),
+            "result": result,
+        }
+
+    return _rpc_success(result, payload=payload)
 
 
 def _hash_token(token):
@@ -159,7 +189,7 @@ def _dispatch_existing_workshop_route(token_record, endpoint, payload):
     if hasattr(result, "status_code"):
         return result
 
-    return _json_response(result)
+    return _json_response(_normalize_workshop_payload(result, payload=payload))
 
 
 class WorkshopMobileAuthController(http.Controller):
@@ -208,14 +238,18 @@ class WorkshopMobileAuthController(http.Controller):
             (request.session.sid or "")[:8],
         )
 
-        return _json_response(_rpc_success({
-            "uid": uid,
-            "name": user.name,
-            "username": user.login,
-            "mobile_token": token,
-            "mobile_expires_at": expires_at,
-            "mobile_expires_in": TOKEN_TTL_SECONDS,
-        }, payload=payload))
+        return _json_response({
+            "jsonrpc": "2.0",
+            "id": _rpc_id(payload),
+            "result": {
+                "uid": uid,
+                "name": user.name,
+                "username": user.login,
+                "mobile_token": token,
+                "mobile_expires_at": expires_at,
+                "mobile_expires_in": TOKEN_TTL_SECONDS,
+            },
+        })
 
     @http.route("/mobile/logout", type="http", auth="none", methods=["POST", "OPTIONS"], csrf=False)
     def mobile_logout(self, **kwargs):
