@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import secrets
 import urllib.error
 import urllib.request
@@ -10,28 +11,44 @@ from odoo.http import request
 from odoo.tools import date_utils
 
 
+_logger = logging.getLogger(__name__)
 TOKEN_TTL_SECONDS = 60 * 60 * 12
 
 
+def _read_json():
+    raw = request.httprequest.get_data(as_text=True) or "{}"
+    return json.loads(raw)
+
+
 def _json_response(payload, status=200):
-    return request.make_json_response(payload, status=status)
+    return request.make_response(
+        json.dumps(payload, default=date_utils.json_default),
+        headers=[
+            ("Content-Type", "application/json"),
+            ("Access-Control-Allow-Origin", "*"),
+            ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+            ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+        ],
+        status=status,
+    )
 
 
-def _rpc_success(data):
+def _rpc_id(payload=None):
+    return (payload or {}).get("id", 1)
+
+
+def _rpc_success(data, payload=None):
     return {
         "jsonrpc": "2.0",
-        "id": request.jsonrequest.get("id") if request.jsonrequest else 1,
-        "result": {
-            "success": True,
-            "data": data,
-        },
+        "id": _rpc_id(payload),
+        "result": data,
     }
 
 
-def _rpc_error(message, code=100, status=200):
+def _rpc_error(message, code=100, status=200, payload=None):
     return _json_response({
         "jsonrpc": "2.0",
-        "id": request.jsonrequest.get("id") if request.jsonrequest else 1,
+        "id": _rpc_id(payload),
         "error": {
             "code": code,
             "message": message,
@@ -66,7 +83,7 @@ def _bearer_token():
     return auth_header[len(prefix):].strip()
 
 
-def _mobile_user():
+def _mobile_token_record():
     token = _bearer_token()
     if not token:
         return None
@@ -84,14 +101,14 @@ def _mobile_user():
     return token_record
 
 
-def _forward_existing_workshop_route(token_record, endpoint):
-    payload = json.dumps(request.jsonrequest or {}).encode("utf-8")
+def _forward_existing_workshop_route(token_record, endpoint, payload):
+    upstream_payload = json.dumps(payload).encode("utf-8")
     base_url = request.env["ir.config_parameter"].sudo().get_param("web.base.url")
     url = "%s/api/workshop/%s" % (base_url.rstrip("/"), endpoint)
 
     upstream_request = urllib.request.Request(
         url,
-        data=payload,
+        data=upstream_payload,
         method="POST",
         headers={
             "Content-Type": "application/json",
@@ -113,7 +130,7 @@ def _forward_existing_workshop_route(token_record, endpoint):
     except json.JSONDecodeError:
         data = {
             "jsonrpc": "2.0",
-            "id": request.jsonrequest.get("id") if request.jsonrequest else 1,
+            "id": _rpc_id(payload),
             "error": {
                 "code": status,
                 "message": body or "Upstream workshop API returned a non-JSON response",
@@ -124,23 +141,30 @@ def _forward_existing_workshop_route(token_record, endpoint):
 
 
 class WorkshopMobileAuthController(http.Controller):
-    @http.route("/mobile/authenticate", type="json", auth="none", methods=["POST"], csrf=False)
+    @http.route("/mobile/authenticate", type="http", auth="none", methods=["POST", "OPTIONS"], csrf=False)
     def mobile_authenticate(self, **kwargs):
-        params = (request.jsonrequest or {}).get("params") or kwargs
-        db = params.get("db") or request.session.db
+        if request.httprequest.method == "OPTIONS":
+            return _json_response({}, status=204)
+
+        payload = _read_json()
+        params = payload.get("params") or payload
+        db = params.get("db") or request.session.db or request.db
         login = params.get("login")
         password = params.get("password")
 
         if not db or not login or not password:
-            return _rpc_error("db, login and password are required", code=400, status=400)
+            return _rpc_error("db, login and password are required", code=400, status=400, payload=payload)
 
         try:
             uid = _authenticate_session(db, login, password)
         except AccessDenied:
-            return _rpc_error("Invalid credentials", code=401, status=401)
+            return _rpc_error("Invalid credentials", code=401, status=401, payload=payload)
+        except Exception:
+            _logger.exception("Mobile authentication failed")
+            return _rpc_error("Mobile authentication failed on the Odoo server", code=500, status=500, payload=payload)
 
         if not uid:
-            return _rpc_error("Invalid credentials", code=401, status=401)
+            return _rpc_error("Invalid credentials", code=401, status=401, payload=payload)
 
         user = request.env["res.users"].sudo().browse(uid)
         token = secrets.token_urlsafe(48)
@@ -153,28 +177,35 @@ class WorkshopMobileAuthController(http.Controller):
             "expires_at": expires_at,
         })
 
-        return {
+        return _json_response(_rpc_success({
             "uid": uid,
             "name": user.name,
             "username": user.login,
             "mobile_token": token,
-            "mobile_expires_at": date_utils.json_default(expires_at),
+            "mobile_expires_at": expires_at,
             "mobile_expires_in": TOKEN_TTL_SECONDS,
-        }
+        }, payload=payload))
 
-    @http.route("/mobile/logout", type="json", auth="none", methods=["POST"], csrf=False)
+    @http.route("/mobile/logout", type="http", auth="none", methods=["POST", "OPTIONS"], csrf=False)
     def mobile_logout(self, **kwargs):
+        if request.httprequest.method == "OPTIONS":
+            return _json_response({}, status=204)
+
         token = _bearer_token()
         if token:
             request.env["workshop.mobile.token"].sudo().search([
                 ("token_hash", "=", _hash_token(token)),
             ]).write({"active": False})
-        return {"success": True}
+        return _json_response({"success": True})
 
-    @http.route("/mobile/api/workshop/<path:endpoint>", type="json", auth="none", methods=["POST"], csrf=False)
+    @http.route("/mobile/api/workshop/<path:endpoint>", type="http", auth="none", methods=["POST", "OPTIONS"], csrf=False)
     def mobile_workshop_api(self, endpoint, **kwargs):
-        token_record = _mobile_user()
-        if not token_record:
-            return _rpc_error("Mobile session expired", code=401, status=401)
+        if request.httprequest.method == "OPTIONS":
+            return _json_response({}, status=204)
 
-        return _forward_existing_workshop_route(token_record, endpoint)
+        payload = _read_json()
+        token_record = _mobile_token_record()
+        if not token_record:
+            return _rpc_error("Mobile session expired", code=401, status=401, payload=payload)
+
+        return _forward_existing_workshop_route(token_record, endpoint, payload)
