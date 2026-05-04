@@ -72,15 +72,21 @@ def _authenticate_session(db, login, password):
         "type": "password",
     }
 
+    auth_result = None
+
     try:
-        uid = request.session.authenticate(db, credential)
+        auth_result = request.session.authenticate(db, credential)
     except TypeError:
-        uid = request.session.authenticate(db, login, password)
+        auth_result = request.session.authenticate(db, login, password)
 
-    if isinstance(uid, dict):
-        uid = uid.get("uid")
+    if isinstance(auth_result, dict):
+        uid = auth_result.get("uid")
+        session_id = auth_result.get("session_id") or auth_result.get("sid")
+    else:
+        uid = auth_result
+        session_id = None
 
-    return uid or request.session.uid
+    return uid or request.session.uid, session_id or request.session.sid
 
 
 def _bearer_token():
@@ -125,6 +131,13 @@ def _forward_existing_workshop_route(token_record, endpoint, payload):
         },
     )
 
+    _logger.info(
+        "Forwarding mobile workshop request endpoint=%s user=%s session_id_prefix=%s",
+        endpoint,
+        token_record.user_id.id,
+        (token_record.session_id or "")[:8],
+    )
+
     try:
         with urllib.request.urlopen(upstream_request, timeout=60) as upstream:
             status = upstream.status
@@ -164,7 +177,7 @@ class WorkshopMobileAuthController(http.Controller):
             return _rpc_error("db, login and password are required", code=400, status=400, payload=payload)
 
         try:
-            uid = _authenticate_session(db, login, password)
+            uid, session_id = _authenticate_session(db, login, password)
         except AccessDenied:
             return _rpc_error("Invalid credentials", code=401, status=401, payload=payload)
         except Exception:
@@ -181,9 +194,16 @@ class WorkshopMobileAuthController(http.Controller):
         request.env["workshop.mobile.token"].sudo().create({
             "token_hash": _hash_token(token),
             "user_id": uid,
-            "session_id": request.session.sid,
+            "session_id": session_id,
             "expires_at": expires_at,
         })
+
+        _logger.info(
+            "Created mobile token for user=%s session_id_prefix=%s request_sid_prefix=%s",
+            uid,
+            (session_id or "")[:8],
+            (request.session.sid or "")[:8],
+        )
 
         return _json_response(_rpc_success({
             "uid": uid,
