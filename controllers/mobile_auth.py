@@ -150,7 +150,6 @@ def _mobile_token_record():
     if not token_record:
         return None
 
-    token_record.write({"last_used_at": fields.Datetime.now()})
     return token_record
 
 
