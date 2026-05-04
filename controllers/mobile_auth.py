@@ -89,6 +89,16 @@ def _authenticate_session(db, login, password):
     return uid or request.session.uid, session_id or request.session.sid
 
 
+def _save_current_session():
+    if hasattr(request.session, "save"):
+        request.session.save()
+        return
+
+    session_store = getattr(getattr(http, "root", None), "session_store", None)
+    if session_store:
+        session_store.save(request.session)
+
+
 def _bearer_token():
     auth_header = request.httprequest.headers.get("Authorization", "")
     prefix = "Bearer "
@@ -119,6 +129,7 @@ def _forward_existing_workshop_route(token_record, endpoint, payload):
     upstream_payload = json.dumps(payload).encode("utf-8")
     base_url = request.env["ir.config_parameter"].sudo().get_param("web.base.url")
     url = "%s/api/workshop/%s" % (base_url.rstrip("/"), endpoint)
+    cookie = "session_id=%s; db=%s" % (token_record.session_id, request.env.cr.dbname)
 
     upstream_request = urllib.request.Request(
         url,
@@ -126,7 +137,8 @@ def _forward_existing_workshop_route(token_record, endpoint, payload):
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "Cookie": "session_id=%s" % token_record.session_id,
+            "Cookie": cookie,
+            "X-Openerp-Session-Id": token_record.session_id,
             "User-Agent": "WrenchLaneGarageFlow-OdooMobileAuth/1.0",
         },
     )
@@ -186,6 +198,8 @@ class WorkshopMobileAuthController(http.Controller):
 
         if not uid:
             return _rpc_error("Invalid credentials", code=401, status=401, payload=payload)
+
+        _save_current_session()
 
         user = request.env["res.users"].sudo().browse(uid)
         token = secrets.token_urlsafe(48)
