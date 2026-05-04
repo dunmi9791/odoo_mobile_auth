@@ -8,7 +8,6 @@ import urllib.request
 from odoo import fields, http
 from odoo.exceptions import AccessDenied
 from odoo.http import request
-from odoo.tools import date_utils
 
 
 _logger = logging.getLogger(__name__)
@@ -22,7 +21,7 @@ def _read_json():
 
 def _json_response(payload, status=200):
     return request.make_response(
-        json.dumps(payload, default=date_utils.json_default),
+        json.dumps(payload, default=_json_default),
         headers=[
             ("Content-Type", "application/json"),
             ("Access-Control-Allow-Origin", "*"),
@@ -31,6 +30,12 @@ def _json_response(payload, status=200):
         ],
         status=status,
     )
+
+
+def _json_default(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
 
 
 def _rpc_id(payload=None):
