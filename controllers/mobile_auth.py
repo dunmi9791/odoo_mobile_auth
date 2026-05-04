@@ -2,8 +2,6 @@ import hashlib
 import json
 import logging
 import secrets
-import urllib.error
-import urllib.request
 
 from odoo import fields, http
 from odoo.exceptions import AccessDenied
@@ -126,52 +124,40 @@ def _mobile_token_record():
     return token_record
 
 
-def _forward_existing_workshop_route(token_record, endpoint, payload):
-    upstream_payload = json.dumps(payload).encode("utf-8")
-    base_url = request.env["ir.config_parameter"].sudo().get_param("web.base.url")
-    url = "%s/api/workshop/%s" % (base_url.rstrip("/"), endpoint)
-    cookie = "session_id=%s; db=%s" % (token_record.session_id, request.env.cr.dbname)
+def _become_mobile_user(token_record):
+    uid = token_record.user_id.id
+    request.session.uid = uid
+    request.session.login = token_record.user_id.login
+    request.session.db = request.env.cr.dbname
 
-    upstream_request = urllib.request.Request(
-        url,
-        data=upstream_payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Cookie": cookie,
-            "X-Openerp-Session-Id": token_record.session_id,
-            "User-Agent": "WrenchLaneGarageFlow-OdooMobileAuth/1.0",
-        },
-    )
+    update_env = getattr(request, "update_env", None)
+    if callable(update_env):
+        update_env(user=uid)
+    else:
+        request.uid = uid
+
+
+def _dispatch_existing_workshop_route(token_record, endpoint, payload):
+    _become_mobile_user(token_record)
+
+    path = "/api/workshop/%s" % endpoint
+    routing_map = request.env["ir.http"]._routing_map()
+    adapter = routing_map.bind_to_environ(request.httprequest.environ)
 
     _logger.info(
-        "Forwarding mobile workshop request endpoint=%s user=%s session_id_prefix=%s",
+        "Dispatching mobile workshop request endpoint=%s user=%s session_id_prefix=%s",
         endpoint,
         token_record.user_id.id,
         (token_record.session_id or "")[:8],
     )
 
-    try:
-        with urllib.request.urlopen(upstream_request, timeout=60) as upstream:
-            status = upstream.status
-            body = upstream.read().decode("utf-8")
-    except urllib.error.HTTPError as error:
-        status = error.code
-        body = error.read().decode("utf-8")
+    rule, arguments = adapter.match(path_info=path, method="POST", return_rule=True)
+    result = rule.endpoint(**arguments)
 
-    try:
-        data = json.loads(body) if body else {}
-    except json.JSONDecodeError:
-        data = {
-            "jsonrpc": "2.0",
-            "id": _rpc_id(payload),
-            "error": {
-                "code": status,
-                "message": body or "Upstream workshop API returned a non-JSON response",
-            },
-        }
+    if hasattr(result, "status_code"):
+        return result
 
-    return _json_response(data, status=status)
+    return _json_response(result)
 
 
 class WorkshopMobileAuthController(http.Controller):
@@ -251,4 +237,4 @@ class WorkshopMobileAuthController(http.Controller):
         if not token_record:
             return _rpc_error("Mobile session expired", code=401, status=401, payload=payload)
 
-        return _forward_existing_workshop_route(token_record, endpoint, payload)
+        return _dispatch_existing_workshop_route(token_record, endpoint, payload)
