@@ -90,8 +90,9 @@ def _authenticate_session(db, login, password):
 
 
 def _save_current_session():
-    if hasattr(request.session, "save"):
-        request.session.save()
+    save = getattr(request.session, "save", None)
+    if callable(save):
+        save()
         return
 
     session_store = getattr(getattr(http, "root", None), "session_store", None)
