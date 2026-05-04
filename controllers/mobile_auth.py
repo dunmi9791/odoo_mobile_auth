@@ -141,7 +141,9 @@ def _dispatch_existing_workshop_route(token_record, endpoint, payload):
     _become_mobile_user(token_record)
 
     path = "/api/workshop/%s" % endpoint
-    routing_map = request.env["ir.http"]._routing_map()
+    routing = request.env["ir.http"]
+    routing_map_method = getattr(routing, "_routing_map", None) or getattr(routing, "routing_map")
+    routing_map = routing_map_method()
     adapter = routing_map.bind_to_environ(request.httprequest.environ)
 
     _logger.info(
