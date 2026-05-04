@@ -72,6 +72,9 @@ def _authenticate_session(db, login, password):
     except TypeError:
         uid = request.session.authenticate(db, login, password)
 
+    if isinstance(uid, dict):
+        uid = uid.get("uid")
+
     return uid or request.session.uid
 
 
